@@ -26,6 +26,7 @@
   img { display: block; width: auto; height: auto; max-width: 100%; max-height: 65vh; margin: auto; }
   textarea { display: block; width: min(100%, 40rem); font: inherit; box-sizing: border-box; }
   .links { display: flex; gap: 1rem; flex-wrap: wrap; }
+  .rotation-review { border-top: 1px solid #d7d9cd; margin-top: 1rem; padding-top: 1rem; }
   .comparison-group { border-top: 1px solid #d7d9cd; margin-top: 1.5rem; padding-top: 1rem; }
   .compare-scans { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr)); gap: 1rem; }
   .compare-card { background: white; padding: .85rem; display: grid; grid-template-rows: 15rem 1fr auto; gap: .6rem; min-width: 0; }
@@ -39,6 +40,11 @@
   <label>View <select id="filter">
     <option value="all">All</option><option value="unreviewed">Unreviewed</option>
     <option value="kept">Starred</option><option value="rejected">Rejected</option>
+    <optgroup label="Rotation">
+      <option value="rotation-pending">Awaiting final review</option>
+      <option value="rotation-selected">Rotation picks</option>
+      <option value="rotation-passed">Passed at final review</option>
+    </optgroup>
   </select></label>
   <label id="topics-control">Topic <select id="topic">
     <option value="all">All topics</option>
@@ -121,6 +127,15 @@
       <button id="reject" aria-pressed="false">Reject</button>
       <button id="clear">Clear decision</button>
     </div>
+    <section id="rotation-review" class="rotation-review" aria-labelledby="rotation-title" hidden>
+      <h3 id="rotation-title">Final review</h3>
+      <p>Would you want this poster on your wall all day?</p>
+      <div class="actions">
+        <button id="select-rotation" aria-pressed="false">Select for rotation</button>
+        <button id="pass-rotation" aria-pressed="false">Pass for rotation</button>
+        <button id="clear-rotation" hidden>Clear final decision</button>
+      </div>
+    </section>
     <p><label for="note">Review note</label>
       <textarea id="note" rows="2" placeholder="For example, added text or a damaged scan"></textarea>
     </p>
@@ -378,6 +393,7 @@ function renderComparison() {
       details.textContent = [
         record.title, record.artist, record.date, record.source_name || `LoC ${record.record_id}`,
         decisions[record.record_id]?.approved_crop ? "Crop approved" : "",
+        decisions[record.record_id]?.rotation === "selected" ? "Rotation pick" : "",
       ].filter(Boolean).join(" · ");
       card.querySelector('[data-action="inspect"]').onclick = () => {
         comparing = false;
@@ -400,6 +416,13 @@ function renderComparison() {
   }
 }
 
+function matchesView(decision, filter) {
+  if (filter.startsWith("rotation-")) {
+    return decision?.status === "kept" && `rotation-${decision.rotation || "pending"}` === filter;
+  }
+  return filter === "all" || filter === (decision?.status || "unreviewed");
+}
+
 function render() {
   elements.compare.setAttribute("aria-pressed", String(comparing));
   elements.compare.textContent = comparing ? "Back to poster review" : "Compare starred scans";
@@ -420,18 +443,19 @@ function render() {
   visible = records.filter(record =>
     (source === "all" || (source === "additions" ? record.source_name : !record.source_name)) &&
     (topic === "all" || record.topics?.includes(topic)) &&
-    (filter === "all" || filter === (decisions[record.record_id]?.status || "unreviewed"))
+    matchesView(decisions[record.record_id], filter)
   );
   index = Math.max(0, Math.min(index, visible.length - 1));
   const record = visible[index];
   elements.record.hidden = !record;
   elements.previous.disabled = index === 0;
   elements.next.disabled = index >= visible.length - 1;
-  const reviewed = records.map(record => decisions[record.record_id]?.status);
+  const reviewed = records.map(record => decisions[record.record_id]);
   elements.counts.textContent = [
     record ? `${index + 1} of ${visible.length}` : "No matching posters",
-    `${reviewed.filter(status => status === "kept").length} starred`,
-    `${reviewed.filter(status => status === "rejected").length} rejected`,
+    `${reviewed.filter(decision => decision?.status === "kept").length} starred`,
+    `${reviewed.filter(decision => decision?.status === "rejected").length} rejected`,
+    `${reviewed.filter(decision => matchesView(decision, "rotation-selected")).length} rotation picks`,
   ].join(" · ");
   if (!record) return;
 
@@ -449,6 +473,10 @@ function render() {
   elements.reject.setAttribute("aria-pressed", decision?.status === "rejected");
   elements.clear.disabled = !decision?.status && !decision?.note;
   elements.note.value = decision?.note || "";
+  elements["rotation-review"].hidden = decision?.status !== "kept";
+  elements["select-rotation"].setAttribute("aria-pressed", String(decision?.rotation === "selected"));
+  elements["pass-rotation"].setAttribute("aria-pressed", String(decision?.rotation === "passed"));
+  elements["clear-rotation"].hidden = !decision?.rotation;
 }
 
 function saveDecision(status) {
@@ -456,8 +484,19 @@ function saveDecision(status) {
   if (!record) return;
   const note = elements.note.value.trim();
   const previous = decisions[record.record_id];
-  if (status || note || previous?.approved_crop) decisions[record.record_id] = { ...previous, status, note };
+  if (status || note || previous?.approved_crop || previous?.rotation) decisions[record.record_id] = { ...previous, status, note };
   else delete decisions[record.record_id];
+  persist();
+  render();
+}
+
+function saveRotation(rotation) {
+  const record = visible[index];
+  if (!record) return;
+  const decision = decisions[record.record_id];
+  if (decision?.status !== "kept") return;
+  if (rotation) decision.rotation = rotation;
+  else delete decision.rotation;
   persist();
   render();
 }
@@ -490,6 +529,9 @@ elements["undo-compare"].onclick = () => {
   persist();
   render();
 };
+elements["select-rotation"].onclick = () => saveRotation("selected");
+elements["pass-rotation"].onclick = () => saveRotation("passed");
+elements["clear-rotation"].onclick = () => saveRotation(null);
 elements.keep.onclick = () => saveDecision("kept");
 elements.reject.onclick = () => saveDecision("rejected");
 elements.clear.onclick = () => { elements.note.value = ""; saveDecision(null); };
@@ -497,7 +539,8 @@ elements.note.onchange = () => saveDecision(decisions[visible[index]?.record_id]
 elements.export.onclick = () => {
   const starred = records.filter(record => decisions[record.record_id]?.status === "kept")
     .map(record => ({ ...record, approved_crop: decisions[record.record_id].approved_crop }));
-  const file = new Blob([JSON.stringify({ decisions, starred }, null, 2)], { type: "application/json" });
+  const rotation = starred.filter(record => matchesView(decisions[record.record_id], "rotation-selected"));
+  const file = new Blob([JSON.stringify({ decisions, starred, rotation }, null, 2)], { type: "application/json" });
   const link = document.createElement("a");
   link.href = URL.createObjectURL(file);
   link.download = "wpa-review-decisions.json";
@@ -509,7 +552,10 @@ elements.import.onchange = async () => {
     const imported = JSON.parse(await elements.import.files[0].text()).decisions;
     if (!imported || Array.isArray(imported) || typeof imported !== "object") throw new Error();
     for (const [id, value] of Object.entries(imported)) {
-      if (!/^(?:commons-)?\d+$/.test(id) || !value || !["kept", "rejected", null].includes(value.status) || typeof value.note !== "string" || ("approved_crop" in value && !validCrop(value.approved_crop))) {
+      if (!/^(?:commons-)?\d+$/.test(id) || !value ||
+          !["kept", "rejected", null].includes(value.status) || typeof value.note !== "string" ||
+          ("approved_crop" in value && !validCrop(value.approved_crop)) ||
+          ("rotation" in value && !["selected", "passed"].includes(value.rotation))) {
         throw new Error();
       }
     }
