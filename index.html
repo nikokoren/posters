@@ -50,14 +50,11 @@
     <option value="all">All topics</option>
     <option value="parks">National parks &amp; monuments</option>
     <option value="travel">Travel &amp; tourism</option>
-    <option value="stage">Stage &amp; music</option>
-    <option value="art">Art &amp; exhibitions</option>
     <option value="sports">Sports &amp; recreation</option>
     <option value="nature">Animals &amp; nature</option>
     <option value="food">Food &amp; drink</option>
     <option value="tech">Transport &amp; technology</option>
     <option value="advertising">Graphic advertising</option>
-    <option value="health">Public health</option>
     <option value="wartime">Wartime</option>
   </select></label>
   <label id="source-control">Source <select id="catalog-source">
@@ -131,6 +128,7 @@
       <button id="reject" aria-pressed="false">Reject</button>
       <button id="clear">Clear decision</button>
     </div>
+    <p id="category-veto" hidden>Vetoed by topic.</p>
     <section id="rotation-review" class="rotation-review" aria-labelledby="rotation-title" hidden>
       <h3 id="rotation-title">Final review</h3>
       <p>Would you want this poster on your wall all day?</p>
@@ -216,6 +214,28 @@ function editCrop(box, mode, start, point) {
     mode.includes("s") ? clamp(point[1], top + minimumSize, 1) : bottom,
   ];
 }
+
+const VETOED_TOPICS = new Set(["art", "arts", "stage", "music", "health"]);
+
+function isVetoed(record) {
+  return VETOED_TOPICS.has(record?.theme) ||
+    Boolean(record?.topics?.some(topic => VETOED_TOPICS.has(topic)));
+}
+
+function applyCategoryVetoes(records, decisions) {
+  let changed = false;
+  for (const record of records) {
+    if (!isVetoed(record)) continue;
+    const decision = decisions[record.record_id];
+    if (decision?.status === "rejected" && !("rotation" in decision)) continue;
+    const next = { note: "", ...decision, status: "rejected" };
+    delete next.rotation;
+    decisions[record.record_id] = next;
+    changed = true;
+  }
+  return changed;
+}
+
 
 const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map(el => [el.id, el]));
 const storageKey = "wpa-poster-review-v1";
@@ -445,6 +465,7 @@ function render() {
   const filter = elements.filter.value;
   const source = elements["catalog-source"].value;
   visible = records.filter(record =>
+    (filter === "rejected" || !isVetoed(record)) &&
     (source === "all" || (source === "additions" ? record.source_name : !record.source_name)) &&
     (topic === "all" || record.topics?.includes(topic)) &&
     matchesView(decisions[record.record_id], filter)
@@ -473,6 +494,11 @@ function render() {
   elements.original.textContent = record.source_image_url ? "Open original scan" : "Open scan preview";
   elements.poster.alt = record.title;
   if (activeScan !== record) loadScan(record);
+  const vetoed = isVetoed(record);
+  elements["category-veto"].hidden = !vetoed;
+  elements.keep.hidden = vetoed;
+  elements.reject.hidden = vetoed;
+  elements.clear.hidden = vetoed;
   elements.keep.setAttribute("aria-pressed", decision?.status === "kept");
   elements.reject.setAttribute("aria-pressed", decision?.status === "rejected");
   elements.clear.disabled = !decision?.status && !decision?.note;
@@ -485,7 +511,7 @@ function render() {
 
 function saveDecision(status) {
   const record = visible[index];
-  if (!record) return;
+  if (!record || (isVetoed(record) && status !== "rejected")) return;
   const note = elements.note.value.trim();
   const previous = decisions[record.record_id];
   if (status || note || previous?.approved_crop || previous?.rotation) decisions[record.record_id] = { ...previous, status, note };
@@ -496,7 +522,7 @@ function saveDecision(status) {
 
 function saveRotation(rotation) {
   const record = visible[index];
-  if (!record) return;
+  if (!record || isVetoed(record)) return;
   const decision = decisions[record.record_id];
   if (decision?.status !== "kept") return;
   if (rotation) decision.rotation = rotation;
@@ -564,6 +590,7 @@ elements.import.onchange = async () => {
       }
     }
     decisions = { ...decisions, ...imported };
+    applyCategoryVetoes(records, decisions);
     activeScan = null;
     lastUnstarred = [];
     persist();
@@ -600,10 +627,10 @@ async function loadRecords() {
   const pilot = await response.json();
   elements.status.textContent = "Showing the four pilot records. Load the full collection to review more posters.";
   return [...pilot.posters, pilot.fallback].map(record => {
-    const { record_id, title, artist, date, rights_advisory, source_image_url } = record;
+    const { record_id, title, artist, date, rights_advisory, source_image_url, theme } = record;
     const path = new URL(source_image_url).pathname.replace(/^\/master\//, "/storage-services/service/").replace(/u\.tif$/, "r.jpg");
     return {
-      record_id, title, artist, date, rights_advisory, source_image_url,
+      record_id, title, artist, date, rights_advisory, source_image_url, theme,
       item_url: `https://www.loc.gov/item/${record_id}/`,
       preview_url: `https://tile.loc.gov${path}`,
     };
@@ -617,9 +644,9 @@ try {
 }
 try {
   records = await loadRecords();
+  if (applyCategoryVetoes(records, decisions)) persist();
   render();
 } catch (error) {
   elements.status.textContent = error.message;
 }
-
 </script>
