@@ -64,14 +64,14 @@
   </select></label>
   <button id="compare" aria-pressed="false">Compare starred scans</button>
   <button id="export">Export decisions</button>
-  <label>Restore decisions <input id="import" type="file" accept=".json,application/json"></label>
+  <label>Restore decisions <input id="import" type="file" accept=".json,application/json" aria-describedby="status" disabled></label>
 </header>
 <main>
+  <p id="status" role="status"></p>
   <nav id="browse" aria-label="Poster navigation">
     <button id="previous">Previous</button><button id="next">Next</button>
     <span id="counts" aria-live="polite"></span>
   </nav>
-  <p id="status" role="status"></p>
   <section id="comparison" aria-labelledby="comparison-title" hidden>
     <h2 id="comparison-title">Starred scans by title</h2>
     <p>Same-title groups can include different artwork. Compare the scans before keeping one.</p>
@@ -534,12 +534,12 @@ function saveRotation(rotation) {
   render();
 }
 
-function persist() {
+function persist(message = "") {
   try {
     localStorage.setItem(storageKey, JSON.stringify(decisions));
-    elements.status.textContent = "";
+    elements.status.textContent = message;
   } catch {
-    elements.status.textContent = "Browser storage is unavailable. Export decisions before closing this page.";
+    elements.status.textContent = [message, "Browser storage is unavailable. Export decisions before closing this page."].filter(Boolean).join(" ");
   }
 }
 
@@ -580,28 +580,50 @@ elements.export.onclick = () => {
   link.click();
   setTimeout(() => URL.revokeObjectURL(link.href), 1000);
 };
-elements.import.onchange = async () => {
+function parseDecisionExport(contents) {
+  let payload;
   try {
-    const imported = JSON.parse(await elements.import.files[0].text()).decisions;
-    if (!imported || Array.isArray(imported) || typeof imported !== "object") throw new Error();
-    for (const [id, value] of Object.entries(imported)) {
-      if (!/^(?:(?:bavarikon|commons|indiana|mkg)-)?\d+$/.test(id) || !value ||
-          !["kept", "rejected", null].includes(value.status) || typeof value.note !== "string" ||
-          ("approved_crop" in value && !validCrop(value.approved_crop)) ||
-          ("rotation" in value && !["selected", "passed"].includes(value.rotation))) {
-        throw new Error();
-      }
+    payload = JSON.parse(contents);
+  } catch {
+    throw new Error("This file could not be parsed as JSON. Choose a decisions export from this reviewer.");
+  }
+  const imported = payload?.decisions;
+  if (!imported || Array.isArray(imported) || typeof imported !== "object") {
+    throw new Error("This file has no decisions object. Choose a decisions export from this reviewer.");
+  }
+  for (const [id, value] of Object.entries(imported)) {
+    if (!/^(?:(?:bavarikon|commons|indiana|mkg)-)?\d+$/.test(id) || !value ||
+        !["kept", "rejected", null].includes(value.status) || typeof value.note !== "string" ||
+        ("approved_crop" in value && !validCrop(value.approved_crop)) ||
+        ("rotation" in value && !["selected", "passed"].includes(value.rotation))) {
+      throw new Error(`The decision for record ${id} is invalid. Check the export and try again.`);
     }
+  }
+  return imported;
+}
+
+elements.import.onchange = async () => {
+  const file = elements.import.files[0];
+  if (!file) return;
+  elements.import.disabled = true;
+  elements.status.textContent = `Reading ${file.name}…`;
+  try {
+    const contents = await file.text().catch(() => {
+      throw new Error("This file could not be read. Choose a local copy and try again.");
+    });
+    const imported = parseDecisionExport(contents);
     decisions = { ...decisions, ...imported };
     applyCategoryVetoes(records, decisions);
     activeScan = null;
     lastUnstarred = [];
-    persist();
+    const count = Object.keys(imported).length;
+    persist(`Restored ${count.toLocaleString()} ${count === 1 ? "decision" : "decisions"} from ${file.name}.`);
     render();
-  } catch {
-    elements.status.textContent = "Choose a decisions JSON file exported from this reviewer.";
+  } catch (error) {
+    elements.status.textContent = error.message;
   } finally {
     elements.import.value = "";
+    elements.import.disabled = false;
   }
 };
 document.addEventListener("keydown", event => {
@@ -649,6 +671,7 @@ try {
   records = await loadRecords();
   if (applyCategoryVetoes(records, decisions)) persist();
   render();
+  elements.import.disabled = false;
 } catch (error) {
   elements.status.textContent = error.message;
 }
